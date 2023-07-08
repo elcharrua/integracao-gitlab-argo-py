@@ -1,0 +1,68 @@
+stages:
+  - build
+  - deploy
+
+build:
+  stage: build
+  image: harbor.rd.com.br/devops/kubectl:2.0.0
+  script:
+    - export CI_PROJECT_PATH=$(echo $CI_PROJECT_PATH | awk -F'/' '{print $5}')
+    - echo $CI_PROJECT_PATH
+    - sed -e "s/\${argo_password_rd}/$ARGO_PASSWORD/g; s/\${group_name}/${CI_PROJECT_PATH}/g" generate_yaml.py > generate_yaml_modified.py
+    - pip install requests
+    - pip install pyyaml
+    - |
+      group_url="https://gitlab.com/api/v4/groups/raiadrogasil%2Frd%2Fdevops-rd%2Fargocd%2F$CI_PROJECT_PATH"
+      echo $group_url
+      group_response=$(curl --header "PRIVATE-TOKEN: $ARGO_API" $group_url)
+      group_id=$(echo $group_response | jq -r '.id')
+      projects=$(curl --header "PRIVATE-TOKEN: $ARGO_API" "https://gitlab.com/api/v4/groups/$group_id/projects?per_page=100" | jq -r '.[].path')
+      for project in $projects; do
+        python generate_yaml_modified.py $project
+      done
+    - rm -r application_template_argo-cd-import-projects.yaml repository_template_argo-cd-import-projects.yaml
+  artifacts:
+    paths:
+      - 'repository_template_*.yaml'
+      - 'application_template_*.yaml'
+      - 'project_template.yaml'
+  tags:
+    - docker
+  only:
+    - main
+
+deploy:
+  stage: deploy
+  image: harbor.rd.com.br/devops/kubectl:2.0.0
+  variables:
+    TAG_ENV: $TAG_ENV_DEV
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID_DEV
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY_DEV
+    AWS_DEFAULT_REGION: $AWS_DEFAULT_REGION_DEV
+    EKS_NAME: $EKS_NAME_DEV
+    NMS_CI: argocd
+  before_script:
+    - echo "10.1.1.177 sonar.raiadrogasil.com.br" >> /etc/hosts && echo "10.1.1.230 git.raiadrogasil.com.br" >> /etc/hosts
+    - aws eks --region $AWS_DEFAULT_REGION update-kubeconfig --name $EKS_NAME
+  script:
+    - mkdir -p artifacts
+    - cp $CI_PROJECT_DIR/repository_template_*.yaml artifacts/
+    - cp $CI_PROJECT_DIR/application_template_*.yaml artifacts/
+    - cp $CI_PROJECT_DIR/project_template.yaml artifacts/
+    - |
+      if ! kubectl get namespace $NMS_CI &>/dev/null; then
+        echo "Creating namespace $NMS_CI"
+        kubectl create namespace $NMS_CI
+      fi
+    - rm -rf generate_yaml.py
+    - for file in *.yaml; do kubectl apply -f "$file"; done
+  after_script:
+    - rm -rf artifacts/
+  when: manual
+  dependencies:
+    - build
+  tags:
+    - docker
+  only:
+    - main
+#QA#
